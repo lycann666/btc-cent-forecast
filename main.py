@@ -27,12 +27,15 @@ closes. Rationale, validated on two independent backtests (see README):
 
 Deterministic: pure arithmetic, no randomness, no clock, no network.
 Reads $MAKEFUN_INPUT_DIR (else /input), writes $MAKEFUN_OUTPUT_DIR
-(else /output). Python 3.13, standard library only.
+(else /output). One malformed case file no longer aborts the run: it is
+skipped with a stderr warning and the run exits nonzero. Python 3.13,
+standard library only.
 """
 
 import json
 import math
 import os
+import sys
 
 INPUT_DIR = os.environ.get("MAKEFUN_INPUT_DIR", "/input")
 OUTPUT_DIR = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
@@ -60,22 +63,39 @@ def forecast(prices):
     finite = [p for p in prices if isinstance(p, (int, float)) and math.isfinite(p)]
     if not finite:
         raise ValueError("market has no finite prices")
-    return price5(sum(finite[-WINDOW:]) / len(finite[-WINDOW:]))
+    window = finite[-WINDOW:]
+    return price5(sum(window) / len(window))
+
+
+def process_case(fname):
+    """Forecast one case file. Returns True on success, False if malformed.
+
+    A malformed case must not abort the whole run: with 12 final cases,
+    one bad input would otherwise cost all 12 forecasts. Bad cases are
+    reported on stderr and counted so the run still exits nonzero.
+    """
+    case_id = fname[: -len(".in")]
+    try:
+        with open(os.path.join(INPUT_DIR, fname), "r", encoding="utf-8") as f:
+            case = json.load(f)
+        market = case["markets"][0]
+        guess = forecast(market["prices"])
+    except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
+        print(f"warning: skipping malformed case {case_id}: {e}", file=sys.stderr)
+        return False
+    out_path = os.path.join(OUTPUT_DIR, case_id + ".out")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"forecasts": [{"case": case_id, "price": guess}]},
+                          separators=(",", ":")) + "\n")
+    return True
 
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     inputs = sorted(f for f in os.listdir(INPUT_DIR) if f.endswith(".in"))
-    for fname in inputs:
-        case_id = fname[: -len(".in")]
-        with open(os.path.join(INPUT_DIR, fname), "r", encoding="utf-8") as f:
-            case = json.load(f)
-        market = case["markets"][0]
-        guess = forecast(market["prices"])
-        out_path = os.path.join(OUTPUT_DIR, case_id + ".out")
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"forecasts": [{"case": case_id, "price": guess}]},
-                              separators=(",", ":")) + "\n")
+    failed = [fname for fname in inputs if not process_case(fname)]
+    if failed:
+        raise SystemExit(f"{len(failed)} case(s) failed: {', '.join(sorted(failed))}")
 
 
 if __name__ == "__main__":
